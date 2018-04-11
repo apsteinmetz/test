@@ -1,0 +1,313 @@
+---
+title: "Introduction to Portfolio Returns"
+output: html_notebook
+author: "Jonathan Regenstein"
+date: 2017-10-11
+---
+
+Today, we go back a bit to where we probably should have started in the first place, but it wouldn’t have been as much fun. In our previous work on volatility, we zipped through the steps of data import, tidy and transformation. Let’s correct that oversight and do some spade work on transforming daily asset prices to monthly portfolio log returns.
+
+Our five-asset portfolio will consist of the following securities and weights:
+
++ SPY (S&P500 fund) weighted 25%
++ EFA (a non-US equities fund) weighted 25%
++ IJS (a small-cap value fund) weighted 20%
++ EEM (an emerging-mkts fund) weighted 20%
++ AGG (a bond fund) weighted 10%
+A brief interlude on portfolios: a portfolio is a weighted collection of assets (its etymology harkens back to the Latin for “to carry sheets of paper”, which I s’pose made its way to the world of investments because securities used to be sheets of paper). The theoretical reason that rational investors prefer a portfolio to a single asset is that a portfolio can offer a better risk/return trade-off due to low or negative covariance amongst portfolio components.
+
+Back to the task at hand: transform a collection of daily ETF prices into an object of portfolio log returns.
+
+Let’s load up our packages.
+
+```{r}
+library(tidyverse)
+library(tidyquant)
+library(timetk)
+
+```
+
+First, we import daily prices for the five ETFs, using getSymbols to grab the data, map(~Ad(get(.))) to select adjusted prices only, and reduce(merge) to mash our five prices into one xts object.
+
+Next, we convert those daily adjusted prices to monthly log returns using two methods. For the first method, we stay in the xts world.
+```{r}
+# The symbols vector holds our tickers. 
+symbols <- c("SPY","EFA", "IJS", "EEM","AGG")
+
+# The prices object will hold our raw price data throughout this book.
+raw_prices <- 
+  quantmod::getSymbols(symbols, src = 'yahoo', from = "2005-01-01", 
+             auto.assign = TRUE, warnings = FALSE)
+
+prices<-raw_prices %>% 
+  map(~Ad(get(.))) %>% 
+  reduce(merge) %>%
+  `colnames<-`(symbols)
+
+prices_monthly <- to.monthly(prices, indexAt = "last", OHLC = FALSE)
+asset_returns_xts <- na.omit(Return.calculate(prices_monthly, method = "log"))
+
+```
+
+For the second method, we will head to the tidyverse/tidyquant world. We will convert from xts to tibble using a call to tk_tbl(preserve_index = TRUE, rename_index = "date"). We will add a column for log returns using mutate(returns = (log(returns) - log(lag(returns)))).
+
+Do we notice any differences?
+```{r}
+# Tidyverse method, to long, tidy format
+asset_returns_long <- 
+  prices %>% 
+  to.monthly(indexAt = "last", OHLC = FALSE) %>% 
+  tk_tbl(preserve_index = TRUE, rename_index = "date") %>%
+  gather(asset, returns, -date) %>% 
+  group_by(asset) %>%  
+  mutate(returns = (log(returns) - log(lag(returns))))
+
+
+#direct tidyverse method -- Art Steinmetz
+asset_returns_long <- symbols %>%
+    tq_get(get  = "stock.prices",
+           from = "2005-01-01") %>%
+    group_by(symbol) %>%
+    tq_transmute(select     = adjusted, 
+                 mutate_fun = periodReturn, 
+                 period     = "monthly", 
+                 col_rename = "returns") %>% 
+  ungroup() %>% 
+  transmute(date,asset=symbol,returns)
+ head(asset_returns_long)
+# A tibble: 6 x 3
+#         date asset     returns
+#       <date> <chr>       <dbl>
+# 1 2005-01-31   SPY -0.01778882
+# 2 2005-02-28   SPY  0.02090361
+# 3 2005-03-31   SPY -0.01829259
+# 4 2005-04-29   SPY -0.01873536
+# 5 2005-05-31   SPY  0.03222467
+# 6 2005-06-30   SPY  0.00151525
+
+#bonus! plot cumutlative returns - Art Steinmetz
+require(tidyr)
+require(dplyr)
+Ra<-asset_returns_long
+#create wealth index. Add a date to start at "1"
+# that is equal to the length between the first and second dates
+new_dates<-(Ra$date[1]-as.numeric(Ra$date[2]-Ra$date[1])) %>% c(Ra$date)
+Ra<- Ra %>% 
+    group_by(asset)%>% 
+    complete(date=new_dates) %>% 
+    mutate(returns=na.fill(returns,0)) %>% 
+    mutate(wealth=cumprod(1+returns))
+  
+Ra %>% 
+    group_by(asset) %>% 
+    ggplot(aes(x=date,y=wealth,color=asset))+geom_line()
+  
+```
+Have a peek at both asset return objects.
+```{r}
+head(asset_returns_xts)
+##                     SPY          EFA         IJS         EEM          AGG
+## 2005-02-28  0.020688126  0.037150948  0.02860922  0.09241734 -0.003721035
+## 2005-03-31 -0.018461970 -0.026583514 -0.02388198 -0.08240681 -0.009790455
+## 2005-04-29 -0.018913092 -0.016309073 -0.05255677 -0.01255390  0.017081857
+## 2005-05-31  0.031716351 -0.008674664  0.05973603  0.03111818  0.008242118
+## 2005-06-30  0.001514103  0.014225362  0.03840792  0.03892299  0.008724056
+## 2005-07-29  0.037547542  0.029527397  0.05677107  0.07400825 -0.010408874
+head(asset_returns_long)
+## # A tibble: 6 x 3
+## # Groups:   asset [1]
+##         date asset      returns
+##       <date> <chr>        <dbl>
+## 1 2005-01-31   SPY           NA
+## 2 2005-02-28   SPY  0.020688126
+## 3 2005-03-31   SPY -0.018461970
+## 4 2005-04-29   SPY -0.018913092
+## 5 2005-05-31   SPY  0.031716351
+## 6 2005-06-30   SPY  0.001514103
+
+```
+
+First, have a look at the left most part of asset_returns_xts, where the date is stored. The asset_returns_xts has a date index, not a column. It is accessed via index(asset_returns_xts). asset_returns_long has a column called “date”, accessed via the $date convention, i.e., asset_returns_long$date.
+
+Second, notice the first date observation for January of 2005. asset_returns_long contains NA, and asset_returns_xts excludes the observation completely. Does it matter? It depends. In a few weeks when we get to the Sortino Ratio, we will see that it can matter quite a bit.
+
+Third, asset_returns_xts is in wide format, which in this case means there is a column for each of our assets. This is the format that xts likes, and it’s the format that is easier to read as a human. However, asset_returns_long is in long, tidy format so that each variable has its own column. It’s a bit harder to read as human, but the tidyverse wants data in this format.
+
+Now on to constructing a portfolio and calculating returns. To turn these five ETFs into a portfolio we need to assign them weights. Let’s first create a weights vector.
+
+```{r}
+w <- c(0.25, 0.25, 0.20, 0.20, 0.10)
+```
+
+Before we use the weights in our calculations, we will run a quick sanity check in the next code chunk. This might not be necessary with five assets as we have today, but it is good practice because if we had 50 assets, it could save us a lot of grief to catch a mistake early.
+
+Make sure that tibble match up with the portfolio we want to create.
+```{r}
+# Make sure the weights line up with assets.
+asset_weights_sanity_check <- tibble(w, symbols)
+asset_weights_sanity_check
+## # A tibble: 5 x 2
+##       w symbols
+##   <dbl>   <chr>
+## 1  0.25     SPY
+## 2  0.25     EFA
+## 3  0.20     IJS
+## 4  0.20     EEM
+## 5  0.10     AGG
+
+```
+
+Finally, make sure the weights sum to 100%, or 1. Again, we can eyeball this with five assets, but with 50 assets it would be easier to run the sanity check.
+
+They sum to 1. Good to go, and on to portfolio returns.
+```{r}
+sum(asset_weights_sanity_check$w)
+## [1] 1
+
+```
+
+We will start with the textbook equation for the return of a multi-asset portfolio which is:
+
+$$Return_{portfolio} = W_{1}*Return_{asset1}~+~W_{2}*Return_{asset2}~+~W_{3}*Return_{asset3}~+~W_{4}*Return_{asset4}~+~W_{5}*Return_{asset5}$$
+
+Returnportfolio=W1∗Returnasset1 + W2∗Returnasset2 + W3∗Returnasset3 + W4∗Returnasset4 + W5∗Returnasset5
+
+We ground through the LaTeX; now let’s grind through the R calculation by hand instead of using built-in functions.
+
+
+First, assign each weight from our w vector to a variable.
+
+Next, assign each asset return stored in asset_returns_xts to a variable.
+
+Last, we insert those new variables into the equation.
+
+Our first portfolio returns calculation is now complete and stored as portfolio_returns_byhand. From a substantive perspective, we are finished and could head to visualization.
+```{r}
+w_1 <- w[1]
+w_2 <- w[2]
+w_3 <- w[3]
+w_4 <- w[4]
+w_5 <- w[5]
+
+
+asset1 <- asset_returns_xts[,1]
+asset2 <- asset_returns_xts[,2]
+asset3 <- asset_returns_xts[,3]
+asset4 <- asset_returns_xts[,4]
+asset5 <- asset_returns_xts[,5]
+
+portfolio_returns_byhand <-   
+  (w_1 * asset1) + 
+  (w_2 * asset2) + 
+  (w_3 * asset3) +
+  (w_4 * asset4) + 
+  (w_5 * asset5)
+
+names(portfolio_returns_byhand) <- "returns"
+
+```
+
+We want to cover more methods, though, so let’s head to to the xts world and the PerformanceAnalytics package. We didn’t explicitly load that package in the setup, because tidyquant imports it for us.
+
+We will use theReturn.portfolio function, which requires two arguments for a portfolio, an xts object of asset returns, and a vector of weights. We have those at hand: asset_returns_xts and w. It’s not necessary, but we will set rebalance_on = "months" so we can confirm it matches our by-hand calculations. Remember, in the by-hand equation, the portfolio weights are fixed, meaning they never change on a month-to-month basis. That is equivalent to re-balancing every month, which in practice would be quite rare.
+
+```{r}
+portfolio_returns_xts_rebalanced_monthly <- 
+  Return.portfolio(asset_returns_xts, weights = w, rebalance_on = "months") %>%
+  `colnames<-`("returns")
+
+```
+
+Next let’s change to a more realistic annual re-balancing and set rebalance_on = "years". This will change our results so that they no longer match our by-hand calculation, which effectively re-balanced every month (since we hard-coded asset weights to be the same each month).
+We can take a peek at our three portfolio objects and see how the annual re-balance made a small but important difference.
+```{r}
+
+portfolio_returns_xts_rebalanced_yearly <- 
+  Return.portfolio(asset_returns_xts, weights = w, rebalance_on = "years") %>%
+  `colnames<-`("returns")
+
+
+head(portfolio_returns_byhand)
+##                returns
+## 2005-02-28  0.03829298
+## 2005-03-31 -0.03349817
+## 2005-04-29 -0.02011949
+## 2005-05-31  0.02475548
+## 2005-06-30  0.02027345
+## 2005-07-29  0.04188371
+head(portfolio_returns_xts_rebalanced_monthly)
+##                returns
+## 2005-02-28  0.03829298
+## 2005-03-31 -0.03349817
+## 2005-04-29 -0.02011949
+## 2005-05-31  0.02475548
+## 2005-06-30  0.02027345
+## 2005-07-29  0.04188371
+head(portfolio_returns_xts_rebalanced_yearly)
+##                returns
+## 2005-02-28  0.03829298
+## 2005-03-31 -0.03418759
+## 2005-04-29 -0.02018237
+## 2005-05-31  0.02441794
+## 2005-06-30  0.02032339
+## 2005-07-29  0.04228070
+```
+Do you notice where the annual re-balancing starts to show a difference from monthly re-balancing?
+
+As before, we could stop here and have accomplished our substantive task (twice already - by hand and using the built-in function from PerformanceAnalytics), but we want to explore alternate methods in the world of tidyverse/tidyquant. We will use our long, tidy-formatted asset_returns_long and convert to portfolio returns using the tq_portfolio function from tidyquant.
+
+The tq_portfolio function takes a tibble and then asks for an assets column to group by, a returns column to find return data, and a weights column. It’s a wrapper for Return.portfolio, and thus also accepts the argument rebalance_on = "months". Since we are re-balancing by months, we should again get a portfolio returns object that matches our two existing objects portfolio_returns_byhand and portfolio_returns_xts_rebalanced_monthly.
+
+```{r}
+portfolio_returns_tq_rebalanced_monthly <- 
+  asset_returns_long %>%
+  tq_portfolio(assets_col  = asset, 
+               returns_col = returns,
+               weights     = w,
+               col_rename  = "returns",
+               rebalance_on = "months")
+
+```
+
+If we want to re-balance annually, it’s the same code as above, except we set rebalance_on = "years".
+
+```{r}
+portfolio_returns_tq_rebalanced_yearly <- 
+  asset_returns_long %>%
+  tq_portfolio(assets_col  = asset, 
+               returns_col = returns,
+               weights     = w,
+               col_rename  = "returns",
+               rebalance_on = "years")
+
+```
+
+We now have two more portfolio returns objects and they are both tidy tibbles. Let’s take a quick look and compare how a tidy tibble of portfolio returns compares to an xts object of portfolio returns.
+
+```{r}
+head(portfolio_returns_tq_rebalanced_yearly)
+## # A tibble: 6 x 2
+##         date     returns
+##       <date>       <dbl>
+## 1 2005-01-31  0.00000000
+## 2 2005-02-28  0.03829298
+## 3 2005-03-31 -0.03418759
+## 4 2005-04-29 -0.02018237
+## 5 2005-05-31  0.02441794
+## 6 2005-06-30  0.02032339
+head(portfolio_returns_xts_rebalanced_yearly)
+##                returns
+## 2005-02-28  0.03829298
+## 2005-03-31 -0.03418759
+## 2005-04-29 -0.02018237
+## 2005-05-31  0.02441794
+## 2005-06-30  0.02032339
+## 2005-07-29  0.04228070
+
+```
+
+Again, we can see a discrepancy for January of 2005. Our xts object elides that date completely, while our tibble records it as a 0.00.
+
+Since there is only one column of returns, there is no wide versus long format for the tibble, and it looks almost identical to the xts object. The only difference is the date: the tibble has a column that holds the date that can be accessed with the $ operator, whereas the xts object has a date index, accessed with index.
+
+That’s all for today. The xts and tidyquant object have their own uses and advantages depending on our end goal. Next time we will think about how to visualize portfolio returns, and how the different objects fit into different visualization paradigms.

@@ -1,0 +1,285 @@
+---
+title: "S&P500 Pleasures"
+output: html_notebook
+---
+S&P Return histograms, after an idea from Drew Thornton and
+Joy Division's famous "Unknown Pleasures" album cover, which has something to do with pulsar star frequencies, I think.
+
+![Unknown Pleasures by Joy Division - 1979 ](https://kottke.org/plus/misc/images/joy-division-unknown-pleasures.jpg)
+
+```{r}
+#-------------------- Setup ----------------
+library(dplyr)
+library(ggplot2)
+library(ggridges) #superceeds ggjoy
+library(tidyverse)
+library(lubridate)
+library(Rblpapi)
+library(stringr)
+library(magick)
+```
+Insert the helper function to get Bloomberg data
+```{r}
+# ignore or delete this chunk if loading prefetched csv file.
+#--------------------tidy_bdh--------------
+
+# Get BBG Data
+# CAUTION: The order of the returned secs series may not be the same as order of the secs inputs
+# CAUTION: There is no guarantee that the all securities will have values for the same dates.
+tidy_bdh<-function(secs,...){
+  blpConnect() #must have a valid blp session running
+  blp_bdh  <-bdh(secs,...=...)
+  blp_bdh_tq<-bind_rows(blp_bdh,.id='ticker') %>%
+    mutate(sector=word(ticker,-1)) %>% 
+    mutate(ticker=word(ticker,1)) %>% 
+    select(date,ticker,everything())%>%
+    group_by(sector,ticker)
+  #special case of only one ticker
+  if (length(secs)==1){
+    blp_bdh_tq$ticker=word(secs,1)
+    blp_bdh_tq$sector=word(secs,-1)
+  }
+  return(blp_bdh_tq)
+}
+
+# example
+#fields=c('DAY_TO_DAY_TOT_RETURN_GROSS_DVDS',"LAST_PRICE",'FUND_TOTAL_ASSETS')
+#START_DATE=as.Date("2002-03-31")
+#secs = c(' OIGAX Equity','DODFX Equity')
+#BDH_OPTIONS = c("periodicitySelection"="MONTHLY")
+#
+#bbg_ret_data  <-tidy_bdh(secs,
+#                         fields=fields, 
+#                         start.date = START_DATE,
+#                         end.date=Sys.Date(),
+#                         options=BDH_OPTIONS)
+
+```
+
+```{r}
+#------------- mutate_cond -------------------------
+mutate_cond <- function(.data, condition, ..., envir = parent.frame()) {
+  condition <- eval(substitute(condition), .data, envir)
+  condition[is.na(condition)] = FALSE
+  .data[condition, ] <- .data[condition, ] %>% mutate(...)
+  .data
+}
+# --------
+```
+
+
+Fetch S&P 500 index data from Bloomberg
+```{r}
+# ignore or delete this chunk if loading prefetched csv file.
+blpConnect()
+secs=c("SPTR Index","SPX Index")
+fields=c("LAST_PRICE")
+START_DATE=as.Date("1970-01-01") #whatever.  as far back as possible
+BDH_OPTIONS = c("periodicitySelection"="MONTHLY")
+
+bbg_ret_data  <-tidy_bdh(secs,
+                         fields=fields, 
+                         start.date = START_DATE,
+                         end.date=Sys.Date(),
+                         options=BDH_OPTIONS)
+
+#save it
+write_csv(bbg_ret_data,path='spx_returns.csv')
+```
+
+```{r, message=FALSE, warning=FALSE}
+#if you don't have bbg then use the csv file that came with this notebook
+bbg_ret_data<-read_csv(file='spx_returns.csv')
+```
+
+Arrange monthly returns into year buckets and order by average return
+```{r, message=FALSE, warning=FALSE}
+joy <- bbg_ret_data %>% 
+  filter(ticker=="SPX") %>% 
+  mutate(return=LAST_PRICE/lag(LAST_PRICE)-1) %>% 
+  na.omit() %>% 
+  mutate(year=as.factor(year(date))) %>% 
+  mutate(month=month(date)) %>% 
+  #rebase to a constant date
+  mutate(doy=as.Date("1970-01-01")+ (date-make_date(year(date),1,1))) %>% 
+  group_by(year) %>%
+  mutate(cumret=cumprod(1+return)-1)
+
+
+#add full year return to each month
+
+year_rank<-joy %>% 
+  top_n(1,date) %>% 
+  select(year,year_ret=cumret)
+
+joy_low<-year_rank %>% 
+  ungroup() %>% 
+  filter(year_ret<0) %>% 
+  mutate(year_decile=ntile(year_ret,5))
+
+joy_high<-year_rank %>% 
+  ungroup() %>% 
+  filter(year_ret>0) %>% 
+  mutate(year_decile=ntile( year_ret,5)+5)
+
+year_rank<-bind_rows(joy_low,joy_high) %>% 
+    mutate(year_decile=as.factor(year_decile)) %>% 
+    group_by(year)
+
+rm(joy_high,joy_low)
+
+
+joy<- year_rank %>% 
+  left_join(joy) %>% 
+  ungroup()
+
+#By default our plots will be in chronological order. If you'd like the ridge lines to appear
+# in return order do this.
+#order the year factor levels by average return for plotting
+joy$year<-factor(joy$year,levels=unique(joy$year[order(joy$year_ret)]))
+#regroup
+joy<-joy %>% group_by(year)
+
+
+```
+
+Now let's plot the density histograms of returns by year.
+
+```{r, message=FALSE, warning=FALSE}
+# trivially simple with the ggridges package
+gg<-ggplot(joy,aes(x=return,y=year,fill=year))
+gg<-gg+geom_density_ridges()+guides(fill=FALSE)
+gg
+```
+Cool!  Now let's make it more Joy Division-y.
+```{r, message=FALSE, warning=FALSE}
+
+gg<-ggplot(joy,aes(x=return,y=year))
+gg<- gg+geom_density_ridges(color = "#F0F0F0", fill = "black",scale=10)
+gg<-gg+ scale_x_continuous(limits = c(-0.05,0.05))
+gg<- gg+  theme(panel.grid = element_blank(),
+          panel.background = element_rect(fill = "#000000"),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title = element_blank())
+gg
+```
+Very nice.
+
+Drew was also looking at cumulative returns rather than density.  How would that work?
+Not well.
+```{r}
+gg<-ggplot(joy,aes(x=doy,y=year,height=cumret))
+gg<- gg+geom_ridgeline(color = "#F0F0F0", fill = "black",scale=10)
+
+gg<- gg+  theme(panel.grid = element_blank(),
+          panel.background = element_rect(fill = "#000000"),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title = element_blank())
+gg
+```
+
+While we might abandon our Joy Division stuff can we present cumulative returns in an attractive way?
+```{r}
+gg<-ggplot(joy,aes(x=doy,y=cumret,color=year))+geom_line(size=2)
+#gg<-gg+ scale_x_continuous(scales::)
+gg
+```
+Yuck.
+
+It's just a busy plot. Here's an approach more along the lines (ahem) of Tufte's sparklines.  Years are ordered from worst to best.
+
+```{r}
+#undo sort year by return
+joy$year<-as.factor(as.numeric(as.character(joy$year)))
+
+gg<- joy %>% filter(year(date)>1986) %>%
+  ggplot(aes(x=doy,y=cumret))+geom_line(size=1,color="darkgreen")+facet_wrap(facets=~year)
+gg<-gg + geom_hline(yintercept = 0)
+#gg<-gg + scale_x_continuous(breaks=c(2,4,6,8,10,12))
+gg<-gg + scale_y_continuous(labels = scales::percent,
+                            breaks=c(-.40,.0,.30))
+
+gg<-gg + labs(y="Cumulative Gain/Loss",x="Month",title="S&P 500 Returns")
+gg
+```
+I think this at least gets the point across, even if it won't get on an album cover.
+
+Let's try to duplicate what Drew ultimately got to.  First do return distibution density plots
+```{r, fig.height=15, fig.width=8,message=TRUE, warning=TRUE}
+#cook up a palette based on range of returns
+color_good<-(RColorBrewer::brewer.pal(5,"YlGn"))
+color_bad<-rev(RColorBrewer::brewer.pal(5,"YlOrRd"))
+#color_set<-RColorBrewer::brewer.pal(10,"RdYlGn")
+color_set<-c(color_bad,color_good)
+#display palette
+#image(1:10,1,as.matrix(1:10),col=color_set,xlab="",ylab="",xaxt="n",yaxt="n",bty="n")
+
+
+gg<-ggplot(joy,aes(x=return,y=year,fill=year_decile))
+gg<-gg+geom_density_ridges(rel_min_height=0.03,scale=5)
+
+#gg<-gg+theme_ridges(font_size = 8)
+gg<-gg+guides(fill=FALSE)+scale_x_continuous(labels=scales::percent, 
+                                             limits = c(-0.05,0.05))
+gg<-gg+scale_fill_manual(values = alpha(color_set, .8))
+gg<- gg+  theme(panel.grid = element_blank(),
+                panel.grid.major.y = element_blank(),
+                panel.background = element_rect(fill = "white"),
+                aspect.ratio = 4/3)
+gg<-gg+labs(x='Daily Return Distribution',y='Year')
+gg
+```
+Now that is purty. How about cumulative returns?
+
+```{r, fig.height=10, fig.width=6,message=TRUE, warning=TRUE}
+gg<-ggplot(joy,aes(x=doy,y=year,height=cumret,group=year,fill=as.factor(year_decile)))
+gg<-gg+geom_ridgeline_gradient(min_height=-0.5,scale=4,gradient_lwd = 0.5)
+
+#gg<-gg+theme_ridges(font_size = 8)
+gg<-gg+guides(fill=FALSE)
+gg<-gg+scale_fill_manual(values = alpha(color_set, .6))
+gg<-gg+scale_x_date(date_labels = "%B")
+gg<- gg+  theme(panel.grid = element_blank(),
+                panel.grid.major.y = element_blank(),
+                panel.background = element_rect(fill = "white"),
+                aspect.ratio = 6/3)
+gg<-gg+labs(x='Return',y='Year')
+gg
+
+```
+
+The daily return distribution is interesting.  Volatility in negative years is huge, both up and down.  As markets improve volatility also falls.  Good years are associated with low volatility.  The farther away we are from a negative year the lower the volatility.  If we animate it we see a cyclical pulse.
+
+```{r}
+
+library(magick)
+
+all_years<-joy %>% select(year) %>% arrange(year) %>% distinct() %>% pull(year)
+
+img<-image_graph(600,400) #open magick graphics device
+for (one_year in all_years){
+  one_period <- joy %>% filter(year==one_year)
+  gg<-ggplot(one_period,aes(x=return))+geom_density(fill=color_set[one_period$year_decile[1]])
+  gg<-gg+guides(fill=FALSE)
+  gg<-gg+scale_x_continuous(labels=scales::percent, 
+                            limits = c(-0.05,0.05))
+  gg<-gg+scale_y_continuous(limits = c(0,150))
+  gg<- gg+  theme(panel.grid = element_blank(),
+                  panel.grid.major.y = element_blank(),
+                  panel.background = element_rect(fill = "white"),
+                  aspect.ratio = 4/3)
+  gg<-gg+geom_vline(xintercept = 0)
+  gg<-gg+labs(title=paste('Daily Return Distribution',one_year),y="",x=one_year)
+  print(gg)
+  
+}
+dev.off() #close graphics device
+animation <- image_animate(img, fps = 2,loop=0)
+#animation <- image_morph(img,frames=2)
+print(animation)
+#image_write(animation,"SPX Return Dist.gif",format = "gif")
+
+```
+

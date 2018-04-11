@@ -1,0 +1,38 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [test of using purr and map](http://luisdva.github.io/rstats/export-iteratively/?utm_content=buffer54d95&utm_medium=social&utm_source=twitter.com&utm_campaign=buffer) Notebook.
+
+```{r}
+# load libraries
+library(dplyr)
+library(purrr)
+library(tidyverse)
+
+# read csv from web
+batRecs <- read_csv("https://raw.githubusercontent.com/luisDVA/codeluis/master/batRecords.csv")
+
+# preview how many files we should be ending up with
+batRecs %>% count(family)
+
+# drop na, split, remove duplicates, write to disk
+br1<-batRecs %>%  na.omit() %>% 
+  split(.$family) %>% 
+  map(~distinct(.x
+                decimal_latitude,
+                decimal_longitude,
+                .keep_all=TRUE)) %>% 
+#  walk(~.x %>%  write.csv(file = paste0("nov1_",unique(.x$family),".csv"),
+#                 row.names = FALSE)) %>% 
+                {.}
+
+#alternatively
+batRecs %>%  na.omit() %>% 
+  distinct(family,decimal_latitude, decimal_longitude,.keep_all=TRUE) %>% 
+  split(.$family) %>% 
+  walk(~.x %>%  write.csv(file = paste0("nov1_",unique(.x$family),".csv"),
+                 row.names = FALSE))
+  
+```
